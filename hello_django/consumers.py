@@ -1,64 +1,79 @@
+
 import json
 from channels.generic.websocket import AsyncWebsocketConsumer
 from urllib.parse import parse_qs
 
-# class SimpleConsumer(AsyncWebsocketConsumer):
-
-#     async def connect(self):
-#         await self.accept()
-
-#     async def receive(self, text_data):
-#         await self.send(text_data=json.dumps({
-#             "reply": "Hello from Django WebSocket!"
-#         }))
-
-#     async def disconnect(self, close_code):
-#         print("❌ Client disconnected")
+import jwt
+from django.conf import settings
 
 
 class ChatConsumer(AsyncWebsocketConsumer):
     async def connect(self):
-        print("")
-        self.room_name = "xyz"
-        self.group_name = f"chat_{self.room_name}"
-     
+
+        query_params = parse_qs(self.scope["query_string"].decode())
+        token = query_params.get("token", [None])[0]
+
+        print("----------token---------->", token)
+
+        if not token:
+            print("---------> token not found")
+            await self.close(code=4001, reason="Missing JWT token")
+            return
+        
+        try:
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+        except jwt.InvalidTokenError:
+            await self.close(code=4002, reason="Invalid JWT token")
+            return
+        
+        self.user_id = payload["user_id"]
+        self.username = payload["username"]
+
+        self.receiver_uuid = str(self.scope["url_route"]["kwargs"]["receiver_uuid"])
+
+
+
+
+        # ! this is important to sort the uuids this will make sure that the group name is always the same
+        # !----------------------------------------------------------------
+        uuids = sorted([self.user_id, self.receiver_uuid])
+        self.grp_name = f"chat_{uuids[0]}_{uuids[1]}"
+        # !----------------------------------------------------------------
+
         await self.channel_layer.group_add(
-            self.group_name,
+            self.grp_name,
             self.channel_name
         )
 
-        print(" ----> 2", self.group_name)
-        
         await self.accept()
 
-
-    async def receive(self, text_data = None, bytes_data = None):
+    async def receive(self, text_data):
         data = json.loads(text_data)
-        print("----> 3", data)
-        chat_message = data.get("chat_message")
-        print("----> 4", chat_message)
+        message = data['message']
 
         await self.channel_layer.group_send(
-            self.group_name,
+            self.grp_name,
             {
-                "type": "send_message",
-                "message": chat_message
+                'type': 'send_message',
+                'message': message,
+                "sender_uuid": self.user_id,
+                "sender_name": self.username
             }
         )
 
     async def send_message(self, event):
-        print("----> 6", event)
-        message = event["message"]
-        print("----> 5", message)
-        await self.send(
-            text_data=json.dumps({
-                "message": message
-            })
-        )
-    
+        message = event['message']
+        sender_uuid = event["sender_uuid"]
+        sender_name = event["sender_name"]
+
+        await self.send(text_data=json.dumps({
+            'message': message,
+            "sender_uuid": sender_uuid,
+            "sender_name": sender_name
+        }))
 
     async def disconnect(self, close_code):
         await self.channel_layer.group_discard(
-            self.group_name,
+            self.grp_name,
             self.channel_name
         )
